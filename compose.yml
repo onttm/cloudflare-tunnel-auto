@@ -1,9 +1,11 @@
 # =============================================================================
-# Community app for Deployrr
-# Repo   : https://github.com/onttm/deployrr-cloudflare-tunnel
-# Bugs   : https://github.com/onttm/deployrr-cloudflare-tunnel/issues
+# Works with any Docker Compose stack. Deployrr compatible.
+# Repo   : https://github.com/onttm/cloudflare-tunnel-auto
+# Bugs   : https://github.com/onttm/cloudflare-tunnel-auto/issues
 # Source : https://github.com/cloudflare/cloudflared
 # =============================================================================
+#
+# Fully API-automated Cloudflare Tunnel — no dashboard setup required.
 #
 # On first run, the init container:
 #   1. Creates a locally-managed Cloudflare Tunnel via API
@@ -11,23 +13,23 @@
 #   3. Writes cloudflared credentials and ingress config to a named volume
 #
 # On subsequent runs, it verifies the tunnel is still active, updates DNS
-# records if domains changed, and regenerates the config. No manual tunnel
-# creation or DNS configuration required.
+# records if domains changed, and regenerates the config.
 #
 # To add a new domain: add DOMAINNAME_N to .env, then:
-#   docker compose up -d --force-recreate cloudflare-tunnel-init cloudflare-tunnel
+#   docker compose up -d --force-recreate cloudflare-tunnel-auto-init cloudflare-tunnel-auto
 #
 # Prerequisites:
-#   - cf_dns_api_token secret must have: Zone:DNS:Edit + Cloudflare Tunnel:Edit
+#   - cf_dns_api_token secret: Cloudflare Account API token with
+#       Zone → DNS → Edit  +  Account → Cloudflare One Connectors → Edit
 #   - DOMAINNAME_1 (and optionally DOMAINNAME_2, DOMAINNAME_3, ...) in .env
-#   - Traefik running on localhost:443
+#   - A reverse proxy listening on localhost:443
 
 services:
 
   # ── Init container — bootstraps tunnel, DNS, and config ─────────────────────
-  cloudflare-tunnel-init:
+  cloudflare-tunnel-auto-init:
     image: ghcr.io/onttm/cloudflare-tunnel-init:latest
-    container_name: cloudflare-tunnel-init
+    container_name: cloudflare-tunnel-auto-init
     security_opt:
       - no-new-privileges:true
     restart: "no"
@@ -41,22 +43,22 @@ services:
       - DOMAINNAME_5
       # Add DOMAINNAME_6, etc. for additional domains
     volumes:
-      - cf_tunnel_config:/etc/cloudflared
+      - cf_tunnel_auto_config:/etc/cloudflared
     secrets:
       - cf_dns_api_token
     # DOCKER-LABELS-PLACEHOLDER
 
   # ── Main tunnel service ──────────────────────────────────────────────────────
-  cloudflare-tunnel:
+  cloudflare-tunnel-auto:
     image: cloudflare/cloudflared:latest
-    container_name: cloudflare-tunnel
+    container_name: cloudflare-tunnel-auto
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
-    profiles: ["core", "all"]
+    # profiles: ["core", "all"]  # Deployrr stack profiles — remove if running standalone
     network_mode: host
     depends_on:
-      cloudflare-tunnel-init:
+      cloudflare-tunnel-auto-init:
         condition: service_completed_successfully
     command: ["tunnel", "--config", "/etc/cloudflared/config.yml", "run"]
     healthcheck:
@@ -66,8 +68,12 @@ services:
       retries: 3
       start_period: 15s
     volumes:
-      - cf_tunnel_config:/etc/cloudflared
+      - cf_tunnel_auto_config:/etc/cloudflared
     # DOCKER-LABELS-PLACEHOLDER
 
 volumes:
-  cf_tunnel_config:
+  cf_tunnel_auto_config:
+
+secrets:
+  cf_dns_api_token:
+    file: ./secrets/cf_dns_api_token

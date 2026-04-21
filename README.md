@@ -1,83 +1,131 @@
-# deployrr-cloudflare-tunnel
+# cloudflare-tunnel-auto
 
-A [Deployrr](https://github.com/SimpleHomelab/Deployrr) community app that runs a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) alongside your existing Traefik stack — no open inbound ports on your router required.
+A fully API-automated [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) — no dashboard setup, no manual DNS records, no token pasting. The tunnel, DNS, and config are created automatically via the Cloudflare API and managed locally. Set it and forget it.
+
+Works with any Docker Compose stack. Compatible with [Deployrr](https://github.com/SimpleHomelab/Deployrr) via [deployrr-tools](https://github.com/onttm/deployrr-tools).
+
+> **How is this different from the official Deployrr cloudflare-tunnel app?**
+> The official app requires you to create the tunnel manually in the Cloudflare dashboard and paste a token. This app does all of that for you via the Cloudflare API — including wildcard DNS records that the dashboard UI does not support.
 
 ## What it does
 
-- Creates a secure, outbound-only connection from your server to Cloudflare's edge
-- Automatically generates **wildcard ingress rules** for every domain in your `.env` (`DOMAINNAME_1`, `DOMAINNAME_2`, ...)
-- Routes `*.yourdomain.com` traffic through Traefik, which handles service routing
-- Your home IP never appears in public DNS — Cloudflare's IPs do instead
+On first run, the init container fully automates setup:
+
+1. Creates a locally-managed Cloudflare Tunnel via the Cloudflare API
+2. Adds wildcard DNS records (`*.yourdomain.com`) for every `DOMAINNAME_N` in your `.env`
+3. Generates the `cloudflared` config with wildcard ingress rules
+4. Exits — the main tunnel service takes over
+
+On subsequent runs it verifies the tunnel is still active, updates DNS and config if domains changed, and exits cleanly. **No manual tunnel creation, DNS setup, or dashboard configuration required.**
 
 ## Architecture
 
-The app uses two services:
-
 ```
-cloudflare-tunnel-init  (alpine, runs once at compose-up)
-  └── decodes CLOUDFLARE_TUNNEL_TOKEN
-  └── loops through DOMAINNAME_1, DOMAINNAME_2, ...
-  └── writes config.yml + creds.json to a named volume
+cloudflare-tunnel-auto-init  (Alpine, runs once at compose-up)
+  ├── reads cf_dns_api_token Docker secret
+  ├── calls Cloudflare API to create tunnel (idempotent)
+  ├── creates *.domain CNAME records for each DOMAINNAME_N
+  ├── writes config.yml + creds.json to a named volume
   └── exits
 
-cloudflare-tunnel  (cloudflare/cloudflared, long-lived)
-  └── reads config from shared volume
-  └── runs the tunnel
+cloudflare-tunnel-auto  (cloudflare/cloudflared, long-lived)
+  ├── waits for init to complete successfully
+  ├── reads config from shared named volume
+  └── runs the tunnel (4 redundant connections to Cloudflare edge)
 ```
 
-`cloudflare/cloudflared:latest` is a distroless image with no shell. The Alpine init container handles all config templating so `cloudflared` never needs one.
+`cloudflare/cloudflared:latest` is a distroless image with no shell. The Alpine init container handles all API calls and config generation so `cloudflared` never needs one.
 
 ## Prerequisites
 
-1. **Cloudflare account** with your domain(s) on Cloudflare DNS
-2. **Traefik** running and bound to `localhost:443` (standard Deployrr setup)
-3. A **Cloudflare Tunnel** created in Zero Trust → Networks → Tunnels
-4. The tunnel **token** from the tunnel's Configure page
+- **Cloudflare account** with your domain(s) managed on Cloudflare DNS
+- **A reverse proxy** (Traefik, nginx, Caddy, etc.) listening on `localhost:443` — the tunnel forwards all traffic there
+- A **Cloudflare Account API token** with two permissions:
+  - `Zone → DNS → Edit` (all zones, or scoped to your specific domains)
+  - `Account → Cloudflare One Connectors → Edit`
 
 ## Installation
 
-### 1. Create a Cloudflare Tunnel
+### 1. Create a Cloudflare Account API token
 
-In the [Cloudflare Zero Trust dashboard](https://one.dash.cloudflare.com):
+> Use an **Account API token**, not a User API token — it is not tied to your login and is safer for server use.
 
-1. Go to **Networks → Tunnels → Create a tunnel**
-2. Choose **Cloudflared** as the connector type
-3. Name it (e.g. `homelab` or your server name)
-4. Copy the tunnel token shown on the next screen
+In the [Cloudflare dashboard](https://dash.cloudflare.com) → **Account Home** → **Manage Account** → **API Tokens** → **Create Token**:
 
-> **Do not configure Public Hostnames in the dashboard.** The init container manages ingress rules locally using wildcard rules that the dashboard UI does not support. Leave the routes tab empty.
+| Permission | Resource | Access |
+|---|---|---|
+| Zone → DNS | All zones | Edit |
+| Account → Cloudflare One Connectors | Your account | Edit |
 
-### 2. Add to your stack via deployrr-tools
+Copy the token value — Cloudflare only shows it once.
 
-```bash
-deployrr-tools.sh --scaffold https://github.com/onttm/deployrr-cloudflare-tunnel
-```
-
-Or clone manually:
+### 2. Clone the repo
 
 ```bash
-git clone https://github.com/onttm/deployrr-cloudflare-tunnel \
-  /opt/deployrr-tools/community-apps/cloudflare-tunnel
+git clone https://github.com/onttm/cloudflare-tunnel-auto
+cd cloudflare-tunnel-auto
 ```
 
-### 3. Add the tunnel token to `.env`
+### 3. Create the secret file
+
+The token is stored as a file-based Docker secret — never in an environment variable or `.env`.
 
 ```bash
-echo "CLOUDFLARE_TUNNEL_TOKEN='<paste your token here>'" | sudo tee -a ~/docker/.env
+mkdir -p secrets
+printf '%s' 'your-token-here' > secrets/cf_dns_api_token
+chmod 600 secrets/cf_dns_api_token
 ```
 
-`DOMAINNAME_1` must already be in your `.env` — it is a standard Deployrr variable.
+> Use `printf '%s'` rather than `echo` to avoid writing a trailing newline into the token file.
 
-### 4. Install via deployrr-tools
+### 4. Create your `.env` file
+
+```bash
+cat > .env <<EOF
+DOMAINNAME_1=yourdomain.com
+# DOMAINNAME_2=seconddomain.com   # optional
+# CLOUDFLARE_TUNNEL_NAME=homelab  # optional, defaults to homelab
+EOF
+```
+
+### 5. Start the tunnel
+
+```bash
+docker compose up -d
+```
+
+> The `profiles:` line in `compose.yml` is commented out by default for standalone use. Deployrr users should uncomment it to integrate with their stack profiles.
+
+The init container runs, creates the tunnel and DNS records, and exits. The tunnel service starts and connects to Cloudflare's edge. Check progress with:
+
+```bash
+docker logs cloudflare-tunnel-auto-init
+docker logs cloudflare-tunnel-auto | grep Registered
+```
+
+---
+
+## Deployrr users
+
+If you are running a [Deployrr](https://github.com/SimpleHomelab/Deployrr) stack, use the provided `install.sh` instead. It reads your existing `.env` and secrets, registers the app in your stack, and starts the tunnel automatically:
+
+```bash
+bash install.sh
+```
+
+### Deployrr community registry
+
+To contribute this app to the Deployrr community registry via [deployrr-tools](https://github.com/onttm/deployrr-tools):
 
 ```bash
 deployrr-tools.sh
-# Select: Browse & install a Deployrr community app → cloudflare-tunnel
+# Select: 2) Prep new community app from GitHub
+# Enter:  https://github.com/onttm/cloudflare-tunnel-auto
 ```
 
 ## Multiple domains
 
-Add domains to `.env` and restart:
+Add domains to `.env`:
 
 ```bash
 # In ~/docker/.env:
@@ -86,52 +134,72 @@ DOMAINNAME_2='seconddomain.com'
 DOMAINNAME_3='thirddomain.com'
 ```
 
-Then force-recreate both services so the init container reruns and regenerates the config:
+The init container reads `DOMAINNAME_1`, `DOMAINNAME_2`, `DOMAINNAME_3`... in sequence and stops when it reaches an unset variable. No hardcoded limit — add as many as you need.
+
+The compose file passes `DOMAINNAME_1` through `DOMAINNAME_5` by default. To use more, add them to the `environment:` block in `compose.yml`:
+
+```yaml
+environment:
+  - DOMAINNAME_6
+  - DOMAINNAME_7
+```
+
+Then force-recreate both services so the init container reruns:
 
 ```bash
-docker compose -f ~/docker/docker-compose-plexy.yml up -d \
-  --force-recreate cloudflare-tunnel-init cloudflare-tunnel
+docker compose up -d --force-recreate cloudflare-tunnel-auto-init cloudflare-tunnel-auto
 ```
+
+## DNS behaviour
+
+For each domain the init container creates:
+
+- `*.yourdomain.com → <tunnel-id>.cfargotunnel.com` (proxied)
+- `yourdomain.com → <tunnel-id>.cfargotunnel.com` (proxied, only if no conflicting records exist)
+
+The root domain record is skipped automatically if the zone already has MX or A records (common when a domain has email configured). The wildcard record covers all subdomains — the root record is rarely needed.
 
 ## The 100 MB limit
 
 Cloudflare enforces a **100 MB request body limit** on all proxied (orange-cloud) traffic. This affects:
 
-- **Nextcloud / Immich** — large file uploads will fail
-- **Frigate** — live RTSP/WebRTC streams should stay on LAN
+- **Nextcloud / Immich** — large file uploads will fail silently
+- **Frigate** — live video streams should stay on LAN
 
-**Workaround:** Use grey-cloud (DNS-only) records for those services so traffic bypasses the proxy and hits your IP directly.
+**Workaround:** Use grey-cloud (DNS-only) CNAME records for those services. Traffic bypasses the Cloudflare proxy and hits your IP directly (requires open ports for those services only).
 
 ## Troubleshooting
 
 **Check tunnel startup and domain config:**
 ```bash
-docker logs cloudflare-tunnel-init
-docker logs cloudflare-tunnel | grep -E 'Tunnel|Registered|ERROR'
+docker logs cloudflare-tunnel-auto-init
+docker logs cloudflare-tunnel-auto | grep -E 'Registered|ERR'
 ```
 
-**Subdomains return 404 even though the tunnel is up:**
-Verify your Cloudflare DNS records are **proxied (orange cloud)**. Grey-cloud records bypass the tunnel routing.
+**Subdomains return 404:**
+Verify Cloudflare DNS records are **proxied (orange cloud)**. Grey-cloud records bypass tunnel routing.
 
-**`ERROR: Could not decode CLOUDFLARE_TUNNEL_TOKEN`:**
-Re-copy the token from Cloudflare dashboard → Zero Trust → Networks → Tunnels → your tunnel → Configure.
+**`ERROR: Cloudflare API token not found`:**
+Ensure `secrets/cf_dns_api_token` exists in your working directory and is mode `600`:
+```bash
+ls -la secrets/cf_dns_api_token
+```
+
+**`ERROR: DOMAINNAME_1 is not set`:**
+Ensure `DOMAINNAME_1=yourdomain.com` is in your `.env` file.
 
 **Config not updating after adding a new domain:**
-The init container only reruns on `--force-recreate`. Run:
+The init container only reruns on `--force-recreate`:
 ```bash
-docker compose -f ~/docker/docker-compose-plexy.yml up -d \
-  --force-recreate cloudflare-tunnel-init cloudflare-tunnel
+docker compose up -d --force-recreate cloudflare-tunnel-auto-init cloudflare-tunnel-auto
 ```
 
 **Services unreachable after enabling the tunnel:**
-Verify Traefik is listening on port 443. The tunnel forwards to `localhost:443` with TLS verification disabled (local self-signed cert is expected).
+Verify your reverse proxy is listening on `localhost:443`. The tunnel forwards all traffic there with TLS verification disabled (self-signed cert is fine).
 
 ## Compatibility
 
 - Tested with Deployrr v6.0
-- Requires Docker Compose v2.23+ (inline `configs` support)
+- Requires Docker Compose v2.20+
 - Requires `cloudflare/cloudflared:latest`
-
-## Related community apps
-
-- [deployrr-cf-companion](https://github.com/onttm/deployrr-tools) — auto-creates Cloudflare CNAME records for every Traefik service (pairs well with this tunnel)
+- Runs on `linux/amd64` and `linux/arm64`

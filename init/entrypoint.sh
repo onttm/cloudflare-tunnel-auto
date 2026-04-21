@@ -77,6 +77,17 @@ fi
 
 if [ -z "$TUNNEL_ID" ]; then
   echo "→ Creating locally-managed tunnel: $TUNNEL_NAME"
+
+  # If a tunnel with this name already exists in Cloudflare (e.g. creds were lost),
+  # delete it first — it's orphaned without its secret anyway.
+  EXISTING_TUNNEL=$(cf GET "$CF_API/accounts/$ACCOUNT_ID/tunnels?name=$TUNNEL_NAME&is_deleted=false")
+  EXISTING_ID=$(echo "$EXISTING_TUNNEL" | jq -r '.result[0].id // empty')
+  if [ -n "$EXISTING_ID" ]; then
+    echo "  Found orphaned tunnel with same name ($EXISTING_ID) — deleting..."
+    cf DELETE "$CF_API/accounts/$ACCOUNT_ID/tunnels/$EXISTING_ID" > /dev/null
+    echo "  Deleted."
+  fi
+
   TUNNEL_SECRET=$(openssl rand -base64 32)
 
   RESPONSE=$(cf POST "$CF_API/accounts/$ACCOUNT_ID/tunnels" \
@@ -122,6 +133,15 @@ while true; do
     ENCODED=$(printf '%s' "$record_name" | sed 's/\*/%2A/g')
     EXISTING=$(cf GET "$CF_API/zones/$ZONE_ID/dns_records?name=$ENCODED&type=CNAME")
     EXISTING_ID=$(echo "$EXISTING" | jq -r '.result[0].id // empty')
+
+    # Skip root domain if non-CNAME records exist (e.g. MX, A — common for email)
+    if [ "$record_name" = "$domain" ] && [ -z "$EXISTING_ID" ]; then
+      OTHER=$(cf GET "$CF_API/zones/$ZONE_ID/dns_records?name=$ENCODED")
+      if [ "$(echo "$OTHER" | jq '.result | length')" -gt 0 ]; then
+        echo "  Skipped (conflicting records exist): $record_name"
+        continue
+      fi
+    fi
 
     PAYLOAD=$(jq -n \
       --arg name "$record_name" \
