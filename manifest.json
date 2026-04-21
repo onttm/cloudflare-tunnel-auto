@@ -1,0 +1,86 @@
+{
+  "$schema": "../../../apps/manifest-schema.json",
+  "version": "1.2",
+
+  "app": {
+    "sname": "cloudflare-tunnel",
+    "pname": "Cloudflare Tunnel",
+    "description": "Cloudflare Tunnel creates a secure outbound-only connection from your server to Cloudflare's edge — no open inbound ports on your router required. This community app automatically generates wildcard ingress rules for all domains defined in your .env (DOMAINNAME_1, DOMAINNAME_2, ...), routing all subdomain traffic through Traefik. Your home IP is never exposed in DNS.",
+    "descriptionShort": "Secure outbound tunnel to Cloudflare — no open ports",
+    "icon": "sh-cloudflare-tunnel",
+    "category": "community",
+    "menuNumber": "06",
+    "tags": ["cloudflare", "tunnel", "networking", "security", "core"]
+  },
+
+  "deployment": {
+    "type": "single",
+    "compose": "compose.yml",
+    "profiles": ["core", "all"],
+    "networks": [],
+    "webui": false,
+    "port": null,
+    "protocol": "http"
+  },
+
+  "requirements": {
+    "prerequisites": ["prerequisites"],
+    "apps": []
+  },
+
+  "traefik": {
+    "supported": false
+  },
+
+  "dashboard": {
+    "enabled": false,
+    "location": "local",
+    "showStats": false
+  },
+
+  "env": {
+    "variables": [
+      {
+        "name": "CLOUDFLARE_TUNNEL_TOKEN",
+        "description": "Tunnel token from Cloudflare Zero Trust → Networks → Tunnels → your tunnel → Configure",
+        "type": "string",
+        "default": "",
+        "prompt": true,
+        "required": true
+      }
+    ]
+  },
+
+  "hooks": {
+    "postInstall": {
+      "messages": [
+        {
+          "style": "info",
+          "text": "Cloudflare Tunnel is running. It will create wildcard ingress rules for every DOMAINNAME_N defined in your .env and route all traffic to Traefik on localhost:443."
+        },
+        {
+          "style": "note",
+          "text": "To add more domains: add DOMAINNAME_2, DOMAINNAME_3, etc. to your .env and restart the container with: docker restart cloudflare-tunnel"
+        },
+        {
+          "style": "warning",
+          "text": "Cloudflare enforces a 100 MB request body limit on proxied traffic. For services that transfer large files (Nextcloud, Immich) or live video streams (Frigate), use grey-cloud DNS records that bypass the proxy."
+        },
+        {
+          "style": "note",
+          "text": "To verify: docker logs cloudflare-tunnel | grep -E 'Tunnel ID|domain|ERROR'"
+        }
+      ]
+    }
+  },
+
+  "folders": {
+    "appdata": []
+  },
+
+  "status": {
+    "file": "06_cloudflare_tunnel_status",
+    "successMessage": "Cloudflare Tunnel Setup Completed",
+    "telemetryAction": "cloudflare-tunnel"
+  }
+}
