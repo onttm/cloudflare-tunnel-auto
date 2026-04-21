@@ -5,11 +5,11 @@
   "app": {
     "sname": "cloudflare-tunnel",
     "pname": "Cloudflare Tunnel",
-    "description": "Cloudflare Tunnel creates a secure outbound-only connection from your server to Cloudflare's edge — no open inbound ports on your router required. This community app automatically generates wildcard ingress rules for all domains defined in your .env (DOMAINNAME_1, DOMAINNAME_2, ...), routing all subdomain traffic through Traefik. Your home IP is never exposed in DNS.",
-    "descriptionShort": "Secure outbound tunnel to Cloudflare — no open ports",
+    "description": "Cloudflare Tunnel creates a secure outbound-only connection from your server to Cloudflare's edge — no open inbound ports on your router required. On first run, the init container automatically creates a locally-managed tunnel via the Cloudflare API, adds wildcard DNS records for every DOMAINNAME_N in your .env, and configures cloudflared. No manual tunnel creation, DNS setup, or dashboard configuration needed.",
+    "descriptionShort": "Cloudflare Tunnel — no open inbound ports",
     "icon": "sh-cloudflare-tunnel",
     "category": "community",
-    "menuNumber": "06",
+    "menuNumber": "07",
     "tags": ["cloudflare", "tunnel", "networking", "security", "core"]
   },
 
@@ -19,7 +19,6 @@
     "profiles": ["core", "all"],
     "networks": [],
     "webui": false,
-    "port": null,
     "protocol": "http"
   },
 
@@ -41,34 +40,41 @@
   "env": {
     "variables": [
       {
-        "name": "CLOUDFLARE_TUNNEL_TOKEN",
-        "description": "Tunnel token from Cloudflare Zero Trust → Networks → Tunnels → your tunnel → Configure",
+        "name": "CLOUDFLARE_TUNNEL_NAME",
+        "description": "Name for the tunnel in Cloudflare Zero Trust (e.g. homelab, plexy). Used only on first run.",
         "type": "string",
-        "default": "",
+        "default": "homelab",
         "prompt": true,
-        "required": true
+        "required": false
       }
     ]
   },
 
   "hooks": {
+    "preInstall": {
+      "dialog": {
+        "type": "warning",
+        "title": "API Token Scope Required",
+        "message": "Your cf_dns_api_token must have TWO permissions:\n\n  Zone → DNS → Edit\n  Account → Cloudflare Tunnel → Edit\n\nIf your existing token only has DNS:Edit, edit it at:\ndash.cloudflare.com → My Profile → API Tokens\n\nThe init container will create the tunnel and DNS records automatically."
+      }
+    },
     "postInstall": {
       "messages": [
         {
           "style": "info",
-          "text": "Cloudflare Tunnel is running. It will create wildcard ingress rules for every DOMAINNAME_N defined in your .env and route all traffic to Traefik on localhost:443."
+          "text": "Cloudflare Tunnel is running. Wildcard DNS records (*.domain) and ingress rules were created automatically for all DOMAINNAME_N defined in your .env."
         },
         {
           "style": "note",
-          "text": "To add more domains: add DOMAINNAME_2, DOMAINNAME_3, etc. to your .env and restart the container with: docker restart cloudflare-tunnel"
+          "text": "To add a new domain: add DOMAINNAME_N to .env, then run: docker compose up -d --force-recreate cloudflare-tunnel-init cloudflare-tunnel"
         },
         {
           "style": "warning",
-          "text": "Cloudflare enforces a 100 MB request body limit on proxied traffic. For services that transfer large files (Nextcloud, Immich) or live video streams (Frigate), use grey-cloud DNS records that bypass the proxy."
+          "text": "Cloudflare enforces a 100 MB request body limit on proxied traffic. For large file transfers (Nextcloud, Immich) or live video streams (Frigate), use grey-cloud DNS records that bypass the proxy."
         },
         {
           "style": "note",
-          "text": "To verify: docker logs cloudflare-tunnel | grep -E 'Tunnel ID|domain|ERROR'"
+          "text": "To verify: docker logs cloudflare-tunnel-init && docker logs cloudflare-tunnel | grep Registered"
         }
       ]
     }
@@ -79,8 +85,8 @@
   },
 
   "status": {
-    "file": "06_cloudflare_tunnel_status",
+    "file": "07_cloudflaretunnel_status",
     "successMessage": "Cloudflare Tunnel Setup Completed",
-    "telemetryAction": "cloudflare-tunnel"
+    "telemetryAction": "cloudflaretunnel"
   }
 }

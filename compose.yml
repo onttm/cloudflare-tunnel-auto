@@ -1,24 +1,52 @@
 # =============================================================================
-# Community app scaffolded for Deployrr
+# Community app for Deployrr
 # Repo   : https://github.com/onttm/deployrr-cloudflare-tunnel
 # Bugs   : https://github.com/onttm/deployrr-cloudflare-tunnel/issues
 # Source : https://github.com/cloudflare/cloudflared
 # =============================================================================
-
-# How it works:
-#   At startup, the entrypoint script reads CLOUDFLARE_TUNNEL_TOKEN and all
-#   DOMAINNAME_N variables from your .env, generates a cloudflared config.yml
-#   with wildcard ingress rules for each domain, then starts cloudflared.
-#   No hardcoded domain names — add more domains by defining DOMAINNAME_2,
-#   DOMAINNAME_3, etc. in your .env and restarting the container.
+#
+# On first run, the init container:
+#   1. Creates a locally-managed Cloudflare Tunnel via API
+#   2. Adds wildcard DNS records (*.domain.com) for each DOMAINNAME_N
+#   3. Writes cloudflared credentials and ingress config to a named volume
+#
+# On subsequent runs, it verifies the tunnel is still active, updates DNS
+# records if domains changed, and regenerates the config. No manual tunnel
+# creation or DNS configuration required.
+#
+# To add a new domain: add DOMAINNAME_N to .env, then:
+#   docker compose up -d --force-recreate cloudflare-tunnel-init cloudflare-tunnel
 #
 # Prerequisites:
-#   1. A Cloudflare Tunnel created in Zero Trust → Networks → Tunnels
-#   2. CLOUDFLARE_TUNNEL_TOKEN in your .env (copied from the tunnel dashboard)
-#   3. At least DOMAINNAME_1 in your .env (standard Deployrr variable)
-#   4. Traefik running and reachable on localhost:443
+#   - cf_dns_api_token secret must have: Zone:DNS:Edit + Cloudflare Tunnel:Edit
+#   - DOMAINNAME_1 (and optionally DOMAINNAME_2, DOMAINNAME_3, ...) in .env
+#   - Traefik running on localhost:443
 
 services:
+
+  # ── Init container — bootstraps tunnel, DNS, and config ─────────────────────
+  cloudflare-tunnel-init:
+    image: ghcr.io/onttm/cloudflare-tunnel-init:latest
+    container_name: cloudflare-tunnel-init
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    network_mode: host
+    environment:
+      - CLOUDFLARE_TUNNEL_NAME=${CLOUDFLARE_TUNNEL_NAME:-homelab}
+      - DOMAINNAME_1
+      - DOMAINNAME_2
+      - DOMAINNAME_3
+      - DOMAINNAME_4
+      - DOMAINNAME_5
+      # Add DOMAINNAME_6, etc. for additional domains
+    volumes:
+      - cf_tunnel_config:/etc/cloudflared
+    secrets:
+      - cf_dns_api_token
+    # DOCKER-LABELS-PLACEHOLDER
+
+  # ── Main tunnel service ──────────────────────────────────────────────────────
   cloudflare-tunnel:
     image: cloudflare/cloudflared:latest
     container_name: cloudflare-tunnel
@@ -27,91 +55,19 @@ services:
     restart: unless-stopped
     profiles: ["core", "all"]
     network_mode: host
-    entrypoint: ["/bin/sh", "/scripts/entrypoint.sh"]
+    depends_on:
+      cloudflare-tunnel-init:
+        condition: service_completed_successfully
+    command: ["tunnel", "--config", "/etc/cloudflared/config.yml", "run"]
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:20241/ready"]
+      test: ["CMD", "cloudflared", "--version"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 15s
     volumes:
-      - /etc/localtime:/etc/localtime:ro
-    environment:
-      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
-      - DOMAINNAME_1
-      - DOMAINNAME_2
-      - DOMAINNAME_3
-      - DOMAINNAME_4
-      - DOMAINNAME_5
-      # Add DOMAINNAME_6, DOMAINNAME_7, etc. here for additional domains
-    configs:
-      - source: cf_tunnel_entrypoint
-        target: /scripts/entrypoint.sh
-        mode: 0755
+      - cf_tunnel_config:/etc/cloudflared
     # DOCKER-LABELS-PLACEHOLDER
 
-configs:
-  cf_tunnel_entrypoint:
-    content: |
-      #!/bin/sh
-      set -e
-
-      # ── Validate required variables ───────────────────────────────────────────
-      if [ -z "$TUNNEL_TOKEN" ]; then
-        echo "ERROR: CLOUDFLARE_TUNNEL_TOKEN is not set in your .env" >&2
-        exit 1
-      fi
-      if [ -z "$DOMAINNAME_1" ]; then
-        echo "ERROR: DOMAINNAME_1 is not set in your .env" >&2
-        exit 1
-      fi
-
-      # ── Extract credentials from TUNNEL_TOKEN ─────────────────────────────────
-      # The token is a base64-encoded JSON object containing the account tag,
-      # tunnel ID, and tunnel secret — everything needed for the credentials file.
-      TOKEN_JSON=$(printf '%s' "$TUNNEL_TOKEN" | base64 -d 2>/dev/null)
-      TUNNEL_ID=$(printf '%s' "$TOKEN_JSON"    | sed 's/.*"t":"\([^"]*\)".*/\1/')
-      ACCOUNT_TAG=$(printf '%s' "$TOKEN_JSON"  | sed 's/.*"a":"\([^"]*\)".*/\1/')
-      TUNNEL_SECRET=$(printf '%s' "$TOKEN_JSON" | sed 's/.*"s":"\([^"]*\)".*/\1/')
-
-      if [ -z "$TUNNEL_ID" ]; then
-        echo "ERROR: Could not decode CLOUDFLARE_TUNNEL_TOKEN — is it valid?" >&2
-        exit 1
-      fi
-
-      echo "Starting Cloudflare Tunnel: $TUNNEL_ID"
-
-      # ── Write credentials file ────────────────────────────────────────────────
-      cat > /tmp/creds.json << CREDS
-      {
-        "AccountTag": "$ACCOUNT_TAG",
-        "TunnelSecret": "$TUNNEL_SECRET",
-        "TunnelID": "$TUNNEL_ID"
-      }
-      CREDS
-
-      # ── Generate ingress config ───────────────────────────────────────────────
-      cat > /tmp/config.yml << CFGHEADER
-      tunnel: $TUNNEL_ID
-      credentials-file: /tmp/creds.json
-
-      ingress:
-      CFGHEADER
-
-      # Loop through DOMAINNAME_1, DOMAINNAME_2, ... until one is empty
-      i=1
-      while true; do
-        eval "domain=\$DOMAINNAME_$i"
-        [ -z "$domain" ] && break
-        printf '  - hostname: "*.%s"\n    service: https://localhost:443\n    originRequest:\n      noTLSVerify: true\n' "$domain" >> /tmp/config.yml
-        printf '  - hostname: "%s"\n    service: https://localhost:443\n    originRequest:\n      noTLSVerify: true\n' "$domain" >> /tmp/config.yml
-        i=$((i + 1))
-      done
-
-      # Catch-all — must be last
-      echo '  - service: http_status:404' >> /tmp/config.yml
-
-      echo "Ingress rules configured for $((i - 1)) domain(s):"
-      grep 'hostname:' /tmp/config.yml | sed 's/^/  /'
-
-      exec cloudflared tunnel --config /tmp/config.yml run
+volumes:
+  cf_tunnel_config:
