@@ -1,12 +1,5 @@
 #!/usr/bin/env bash
 # install.sh — Deployrr stack integration for cloudflare-tunnel-auto
-#
-# Detects your Deployrr environment, reads existing .env and secrets,
-# registers the app in your stack, and starts the tunnel.
-#
-# Usage:
-#   bash install.sh
-#
 # For standalone (non-Deployrr) use, see README.md.
 
 set -euo pipefail
@@ -32,7 +25,6 @@ ok()   { echo -e "  ${GRN}✓${NC} $*"; }
 info() { echo -e "  ${YLW}→${NC} $*"; }
 die()  { echo -e "  ${RED}✗${NC} $*" >&2; exit 1; }
 
-# ── Ensure sudo credentials are cached ───────────────────────────────────────
 ensure_sudo() {
     if sudo -n true 2>/dev/null; then
         return
@@ -45,7 +37,6 @@ ensure_sudo() {
     ok "sudo credentials cached"
 }
 
-# ── Verify this is a Deployrr environment ────────────────────────────────────
 verify_deployrr() {
     local ok=true
     [[ -d "$DEPLOYRR_DIR" ]]        || ok=false
@@ -64,7 +55,6 @@ verify_deployrr() {
     ok "Deployrr environment detected"
 }
 
-# ── Warn if official cloudflare-tunnel app is present ────────────────────────
 check_official_conflict() {
     local official_compose="$DOCKER_DIR/compose/plexy/cloudflare-tunnel.yml"
     local conflict=false
@@ -86,7 +76,6 @@ check_official_conflict() {
     fi
 }
 
-# ── Idempotency — offer update path if already installed ─────────────────────
 check_idempotency() {
     if sudo test -f "$DEPLOYRR_COMPOSE_DEST" 2>/dev/null; then
         echo ""
@@ -109,7 +98,6 @@ check_idempotency() {
     fi
 }
 
-# ── Read env vars from root-owned .env (never source it) ─────────────────────
 read_env() {
     for i in 1 2 3 4 5; do
         local val
@@ -126,7 +114,6 @@ read_env() {
     ok "Read environment: DOMAINNAME_1=${DOMAINNAME_1}, CLOUDFLARE_TUNNEL_NAME=${CLOUDFLARE_TUNNEL_NAME}"
 }
 
-# ── Ensure the API token secret exists ───────────────────────────────────────
 ensure_secret() {
     local secret_path="$DOCKER_SECRETS_DIR/$SECRET_NAME"
 
@@ -153,7 +140,6 @@ ensure_secret() {
     ok "Secret written to $secret_path"
 }
 
-# ── Copy compose file, uncomment Deployrr profiles ───────────────────────────
 install_compose() {
     sudo cp "$COMPOSE_SRC" "$DEPLOYRR_COMPOSE_DEST"
 
@@ -169,60 +155,46 @@ install_compose() {
     ok "Compose file installed to $DEPLOYRR_COMPOSE_DEST"
 }
 
-# ── Register include in master compose ───────────────────────────────────────
-register_include() {
-    local placeholder="SERVICE-PLACEHOLDER-DO-NOT-DELETE"
-    local include_line="  - compose/plexy/cloudflare-tunnel-auto.yml"
-
-    if sudo grep -q "cloudflare-tunnel-auto.yml" "$MASTER_COMPOSE" 2>/dev/null; then
-        ok "Include already registered — skipping"
-        return
-    fi
-
-    sudo awk -v line="$include_line" -v ph="$placeholder" '
-        $0 ~ ph { print line }
+insert_before() {
+    local file="$1" content="$2" placeholder="$3"
+    sudo awk -v c="$content" -v ph="$placeholder" '
+        $0 ~ ph { printf "%s\n", c }
         { print }
-    ' "$MASTER_COMPOSE" | sudo tee "$MASTER_COMPOSE".tmp > /dev/null
-    sudo mv "$MASTER_COMPOSE".tmp "$MASTER_COMPOSE"
+    ' "$file" | sudo tee "$file".tmp > /dev/null
+    sudo mv "$file".tmp "$file"
+}
+
+register_include() {
+    sudo grep -q "cloudflare-tunnel-auto.yml" "$MASTER_COMPOSE" 2>/dev/null \
+        && { ok "Include already registered — skipping"; return; }
+    insert_before "$MASTER_COMPOSE" \
+        "  - compose/plexy/cloudflare-tunnel-auto.yml" \
+        "SERVICE-PLACEHOLDER-DO-NOT-DELETE"
     ok "Include registered in master compose"
 }
 
-# ── Register secret block in master compose ──────────────────────────────────
 register_secret() {
-    local placeholder="SECRETS-PLACEHOLDER-DO-NOT-DELETE"
-
-    if sudo grep -q "cf_dns_api_token" "$MASTER_COMPOSE" 2>/dev/null; then
-        ok "Secret block already registered — skipping"
-        return
-    fi
-
+    sudo grep -q "cf_dns_api_token" "$MASTER_COMPOSE" 2>/dev/null \
+        && { ok "Secret block already registered — skipping"; return; }
     local dockerdir
     dockerdir=$(sudo grep "^DOCKERDIR=" "$DOCKER_ENV" 2>/dev/null \
                 | cut -d= -f2- | tr -d "\"'" || echo "$DOCKER_DIR")
-
-    local block="  cf_dns_api_token:\n    file: ${dockerdir}/secrets/cf_dns_api_token"
-
-    sudo awk -v block="$block" -v ph="$placeholder" '
-        $0 ~ ph { printf "%s\n", block }
-        { print }
-    ' "$MASTER_COMPOSE" | sudo tee "$MASTER_COMPOSE".tmp > /dev/null
-    sudo mv "$MASTER_COMPOSE".tmp "$MASTER_COMPOSE"
+    insert_before "$MASTER_COMPOSE" \
+        "  cf_dns_api_token:\n    file: ${dockerdir}/secrets/cf_dns_api_token" \
+        "SECRETS-PLACEHOLDER-DO-NOT-DELETE"
     ok "Secret block registered in master compose"
 }
 
-# ── Pull latest images ────────────────────────────────────────────────────────
 pull_images() {
     info "Pulling latest images..."
     docker pull "$IMAGE_INIT"    2>&1 | grep -E "Pulling|Pull complete|up to date|Status" || true
     docker pull "$IMAGE_CLOUDFLARED" 2>&1 | grep -E "Pulling|Pull complete|up to date|Status" || true
 }
 
-# ── Launch services ───────────────────────────────────────────────────────────
 launch() {
     sudo docker compose -f "$MASTER_COMPOSE" up -d "$INIT_SVC" "$TUNNEL_SVC" 2>&1
 }
 
-# ── Tail init container logs until it exits ──────────────────────────────────
 tail_init_logs() {
     info "Waiting for init container..."
     local attempts=0
@@ -234,7 +206,6 @@ tail_init_logs() {
     echo ""
 }
 
-# ── Success message ───────────────────────────────────────────────────────────
 print_success() {
     echo -e "  ${GRN}${BLD}Cloudflare Tunnel Auto is running.${NC}"
     echo ""
@@ -245,7 +216,6 @@ print_success() {
     echo "    docker compose -f $MASTER_COMPOSE up -d --force-recreate $INIT_SVC $TUNNEL_SVC"
 }
 
-# ── Main ──────────────────────────────────────────────────────────────────────
 main() {
     echo ""
     echo -e "${BLD}cloudflare-tunnel-auto — Deployrr installer${NC}"
